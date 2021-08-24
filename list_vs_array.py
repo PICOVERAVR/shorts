@@ -3,7 +3,8 @@
 # A CS professor of mine mentioned that linked lists are much faster than arrays at insertion and deletion of middle elements.
 # This is true in a theoretical context, but caches on modern CPUs are really, really effective at absorbing the penalty of copies
 # if the data takes advantage of spacial and temporal locality.
-# Arrays do this.  Linked lists don't.
+
+# Python isn't my native language - I could be missing something here!
 
 import random
 import time
