@@ -6,10 +6,12 @@
 #include <stdio.h>
 #include <limits.h> // for type size checking
 #include <stdint.h> // for checking fast integer types
+#include <math.h> // for FP_FAST_FMA*
 
 #include <stddef.h> // for alignment checking
 #include <stdalign.h>
 
+#include <signal.h> // for catching runtime errors
 #include <time.h>
 
 #ifndef __STDC_NO_THREADS__
@@ -96,6 +98,28 @@ void std_types() {
 	printf("\n");
 }
 
+void math() {
+#ifdef FP_FAST_FMAF
+	printf("float fma(x, y, z) faster than x * y + z\n");
+#else
+	printf("float fma(x, y, z) slower than x * y + z\n");
+#endif
+
+#ifdef FP_FAST_FMA
+	printf("double fma(x, y, z) faster than x * y + z\n");
+#else
+	printf("double fma(x, y, z) slower than x * y + z\n");
+#endif
+
+#ifdef FP_FAST_FMAL
+	printf("long double fma(x, y, z) faster than x * y + z\n");
+#else
+	printf("long double fma(x, y, z) slower than x * y + z\n");
+#endif
+
+	printf("\n");
+}
+
 void host() {
 
 	// misc host information
@@ -146,8 +170,46 @@ void hacks() {
 	printf("\n");
 }
 
+void signal_handler(int signal) {
+	char* sig_str;
+	switch (signal) {
+		case SIGABRT:
+			sig_str = "SIGABRT";
+			break;
+		case SIGFPE:
+			sig_str = "SIGFPE";
+			break;
+		case SIGILL:
+			sig_str = "SIGILL";
+			break;
+		case SIGINT:
+			sig_str = "SIGINT";
+			break;
+		case SIGSEGV:
+			sig_str = "SIGSEGV";
+			break;
+		case SIGTERM:
+			sig_str = "SIGTERM";
+			break;
+		default:
+			sig_str = "??";
+	}
+
+	printf("caught signal %d (%s)\n", signal, sig_str);
+}
+
 int main(int argc, char **argv) {
+	// register all signals with our handler in case things go wrong
+	signal(SIGABRT, signal_handler);
+	signal(SIGFPE, signal_handler);
+	signal(SIGILL, signal_handler);
+	signal(SIGINT, signal_handler);
+	signal(SIGSEGV, signal_handler);
+	signal(SIGTERM, signal_handler);
+
 	std_types();
+
+	math();
 
 #ifndef __STDC_NO_ATOMICS__
 	printf("atomic.h is present\n");
