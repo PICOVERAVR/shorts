@@ -10,9 +10,18 @@
 
 #include <stddef.h> // for alignment checking
 #include <stdalign.h>
+#include <setjmp.h> // for querying jmp_buf
 
 #include <signal.h> // for catching runtime errors
 #include <time.h>
+
+#if __STDC_VERSION__ < 201112L
+#error standard revisions before C11 are not supported!
+#endif
+
+#if __STDC_HOSTED__ != 1
+#warning implementation is not hosted - some standard headers may not be available
+#endif
 
 #ifndef __STDC_NO_THREADS__
 #include <threads.h>
@@ -45,14 +54,6 @@ void atomics() {
 
 #ifndef __STDC_NO_COMPLEX__
 #include <complex.h>
-#endif
-
-#if __STDC_VERSION__ != 201112L
-#error standard revisions before C11 are not supported!
-#endif
-
-#if __STDC_HOSTED__ != 1
-#warning implementation is not hosted - some standard headers may not be available
 #endif
 
 void c_types() {
@@ -89,32 +90,35 @@ void std_types() {
 	printf("uint_least64_t: %ld bytes, %ld byte aligned\n\n", sizeof(uint_least64_t), alignof(uint_least64_t));
 
 	printf("intptr_t: %ld bytes, %ld byte aligned\n", sizeof(intptr_t), alignof(intptr_t));
-	printf("uintptr_t: %ld bytes, %ld byte aligned\n", sizeof(uintptr_t), alignof(uintptr_t));
-	printf("intmax_t: %ld bytes\n", sizeof(intmax_t));
-	printf("max_align_t: %ld bytes\n\n", alignof(max_align_t));
+	printf("uintptr_t: %ld bytes, %ld byte aligned\n\n", sizeof(uintptr_t), alignof(uintptr_t));
 
+	printf("ptrdiff_t: %ld bytes, %ld byte aligned\n", sizeof(ptrdiff_t), alignof(ptrdiff_t));
+	printf("intmax_t: %ld bytes\n", sizeof(intmax_t));
+	printf("uintmax_t: %ld bytes\n", sizeof(uintmax_t));
+	printf("max_align_t: %ld bytes\n", alignof(max_align_t));
 	printf("size_t: %ld bytes\n", sizeof(size_t));
+	printf("wchar_t: %ld bytes, %ld byte aligned\n", sizeof(wchar_t), alignof(wchar_t));
 
 	printf("\n");
 }
 
 void math() {
 #ifdef FP_FAST_FMAF
-	printf("float fma(x, y, z) faster than x * y + z\n");
+	printf("float fma(x, y, z) possibly faster than x * y + z\n");
 #else
-	printf("float fma(x, y, z) slower than x * y + z\n");
+	printf("float fma(x, y, z) possibly slower than x * y + z\n");
 #endif
 
 #ifdef FP_FAST_FMA
-	printf("double fma(x, y, z) faster than x * y + z\n");
+	printf("double fma(x, y, z) possibly faster than x * y + z\n");
 #else
-	printf("double fma(x, y, z) slower than x * y + z\n");
+	printf("double fma(x, y, z) possibly slower than x * y + z\n");
 #endif
 
 #ifdef FP_FAST_FMAL
-	printf("long double fma(x, y, z) faster than x * y + z\n");
+	printf("long double fma(x, y, z) possibly faster than x * y + z\n");
 #else
-	printf("long double fma(x, y, z) slower than x * y + z\n");
+	printf("long double fma(x, y, z) possibly slower than x * y + z\n");
 #endif
 
 	printf("\n");
@@ -122,15 +126,50 @@ void math() {
 
 void host() {
 
-	// misc host information
+	// compiled host information
 
-	const char *path_str = getenv("PATH");
-	printf("PATH variable: %s\n", path_str);
+#ifdef __cplusplus
+	printf("compiled with a c++ compiler\n");
+#else
+	printf("compiled with a c compiler\n");
+#endif
+
+	char* version;
+	if (__STDC_VERSION__ == 199409L) {
+		version = "C89";
+	} else if (__STDC_VERSION__ == 199901L) {
+		version = "C99";
+	} else if (__STDC_VERSION__ == 201112L) {
+		version = "C11";
+	} else if (__STDC_VERSION__ == 201710L) {
+		version = "C17";
+	} else {
+		version = "C2x?";
+	}
+
+	printf("C standard revision: %s (%ld)\n", version, __STDC_VERSION__);
+
+	printf("max rand() return value: %d\n", RAND_MAX);
+
+	printf("__FILE__: %s\n", __FILE__);
+	printf("__DATE__: %s\n", __DATE__);
+	printf("__TIME__: %s\n", __TIME__);
+
+	printf("min number of concurrent open files: %d\n", FOPEN_MAX);
+	printf("max filename length: %d bytes\n", FILENAME_MAX);
 
 	// may want to set locale here
 
 	printf("max bytes in mb char (current locale): %ld\n", MB_CUR_MAX);
 	printf("max bytes in mb char (any locale): %d\n", MB_LEN_MAX);
+
+#ifdef __STDC_UTF_16__
+	printf("char16_t is UTF-16 encoded\n");
+#endif
+
+#ifdef __STDC_UTF_32__
+	printf("char32_t is UTF-32 encoded\n");
+#endif
 
 	clock_t t1 = clock();
 	clock_t t2 = clock();
@@ -145,9 +184,30 @@ void host() {
 	printf("\n");
 }
 
-void hacks() {
+void misc() {
+#ifdef __STDC_NO_VLA__
+	printf("variable length arrays not supported\n");
+#endif
 
-	// checks endianness?
+#ifdef NDEBUG
+	printf("assertions disabled (release build?)\n");
+#else
+	printf("assertions enabled (debug build?)\n");
+#endif
+
+#ifndef __STDC_NO_THREADS__
+	printf("threads.h is present\n");
+#else
+	printf("threads.h is not present\n");
+#endif
+
+	printf("jmp_buf size: %ld bytes\n", sizeof(jmp_buf));
+
+	printf("\n");
+
+}
+
+void hacks() {
 
 	typedef union {
 		uint32_t u32;
@@ -155,10 +215,11 @@ void hacks() {
 	} end_t;
 
 	char *end;
-	size_t off = offsetof(end_t, u8[3]);
-	if (off == 3) {
+	end_t impl;
+	impl.u32 = 0xFF;
+	if (impl.u8[0] == 0xFF) {
 		end = "little";
-	} else if (off == 0) {
+	} else if (impl.u8[3] == 0xFF) {
 		end = "big";
 	} else {
 		end = "?";
@@ -211,17 +272,13 @@ int main(int argc, char **argv) {
 
 	math();
 
+	misc();
+
 #ifndef __STDC_NO_ATOMICS__
 	printf("atomic.h is present\n");
 	atomics();
 #else
 	printf("atomic.h is not present\n");
-#endif
-
-#ifndef __STDC_NO_THREADS__
-	printf("threads.h is present\n");
-#else
-	printf("threads.h is not present\n");
 #endif
 
 	printf("%d arg(s):\n", argc);
