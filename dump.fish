@@ -12,6 +12,8 @@ if test $nargs -lt 2
 	exit 1
 end
 
+set -l bin $argv[1]
+
 for fn in (seq 2 $nargs)
 	set -l sym $argv[$fn]
 	
@@ -21,17 +23,17 @@ for fn in (seq 2 $nargs)
 	end
 
 	# check the symbol table, count matching functions
-	set -l nmatches (objdump --demangle --section=.text --disassemble=$sym | head -n 7 | grep -c $sym)
+	set -l nmatches (objdump --demangle --section=.text --disassemble=$sym $bin | head -n 7 | grep -c $sym)
 	
 	# main is special and doesn't have parenthesis in the symbol table
 	if test $nmatches -eq 1
 		or test $sym = main
 		# run full disassembly
-		objdump --demangle --visualize-jumps=extended-color --section=.text --no-show-raw-insn --dwarf=follow-links --disassembler-options=intel --disassemble=$sym | tail -n +7
+		objdump --demangle --visualize-jumps=extended-color --section=.text --no-show-raw-insn --dwarf=follow-links --disassembler-options=intel --disassemble=$sym $bin | tail -n +7
 	else
 		# either no or multiple matches, print em
 		echo "symbol $sym not found, listing possible matches."
-		objdump --section=.text --demangle --syms | grep $sym | cut --fields=2
+		objdump --section=.text --demangle --syms $bin | grep $sym | cut --fields=2
 		exit 1
 	end
 end
