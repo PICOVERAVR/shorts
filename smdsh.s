@@ -1,14 +1,21 @@
-# shell? entirely within AVX registers
+# shell entirely within AVX registers
 #
 # rules:
-# 1. no heap memory allocation (malloc, sbrk, mmap?, etc), with limited exceptions
+# 1. no heap memory allocation (malloc, brk, mmap, etc)
 # 2. no stack allocation (meaning the adjustment of rbp or rsp)
 #      a. red zones are fair game but vary by OS and architecture
-# 3. no calling libraries that violate rules 1 or 2
+# 3. no calling libraries that violate rules 1 or 2 (including libc)
 # 4. using memory that is already allocated at the start of the program is ok, but don't abuse it
+# 5. storing read only data in .text is ok
 #
 # to run:
-# $ clang -nostdlib old_mem.s -o old_mem && ./old_mem
+# $ clang -nostdlib smdsh.s -o smdsh && ./smdsh
+
+# memory I can use:
+# x86 registers, r8 - r15
+# SSE/AVX/AVX2 registers (don't have AVX512)
+# x87 float registers (8, can use FILD/FIST to load/store integers)
+# 128-byte red zone after rsp
 
 # SSE immediate encodings:
 # _SIDD_UBYTE_OPS = 0
@@ -26,8 +33,9 @@
 # _SIDD_BIT_MASK = 0
 # _SIDD_UINT_MASK = 64
 
-# xmm0: input
-# xmm1: input mask
+# ecx: int argc
+# rdx: char **argv
+# r8: char **env
 
 # lldb:
 # find addr: disas -n <label>
@@ -37,66 +45,119 @@
 
 .text
 
-_start:
-	lea -128(%rsp), %r8 # legal red zone is rsp - 1 to rsp - 128
-
-reset:
-	# set xmm0 = 0
-	vpxor %xmm0, %xmm0, %xmm0
-
-	# set xmm1 = 0xFF...
-	mov $0xFF, %r10
-	pinsrb $0, %r10, %xmm1
-	vpbroadcastb %xmm1, %xmm1
-
-	mov $0, %r10
-
-read:
+# read text into str (XMM), putting reverse mask in mask (XMM) and number of chars in count (GPR)
+.macro Read str, mask, count
+read\@:
 	# read()
 	mov $0, %rax
 	mov $0, %rdi
-	mov %r8, %rsi
+	mov %r9, %rsi
 	mov $1, %rdx
 	syscall
 
-	pslldq $1, %xmm1
-	pinsrb $0, %r10, %xmm1
+	# insert the current string index in ymm1
+	vpslldq $1, \mask, \mask
+	pinsrb $0, \count, %xmm1
 
-	pslldq $1, %xmm0
-	pinsrb $0, (%r8), %xmm0
+	# insert the character read in ymm0
+	vpslldq $1, \str, \str
+	pinsrb $0, (%r9), %xmm0
 
-	inc %r10
+	# increment and wrap index
+	inc \count
+	and $0x1F, \count
 
-	cmpb $'\n', (%r8)
-	jnz read
+	# test for \n, \t, space (done with command)
+	cmpb $'\n', (%r9)
+	jz strip\@
 
-	# un-get newline and mask
-	psrldq $1, %xmm0
-	psrldq $1, %xmm1
+	cmpb $'\t', (%r9)
+	jz strip\@
 
-parse:
-	pshufb %xmm1, %xmm0 # reverse xmm0 using xmm1 mask
+	cmpb $' ', (%r9)
+	jz strip\@
 
-	# perform parsing here
+	jmp read\@
 
-	movdqu %xmm0, (%r8) # write xmm0
+strip\@:
+	# un-get break token and corresponding mask index
+	vpsrldq $1, \str, \str
+	vpsrldq $1, \mask, \mask
 
-print:
+	vpshufb \mask, \str, \str # reverse ymm0 using ymm1 mask and zero unused chars
+.endm
+
+.macro Print label, len
+	# write()
 	mov $1, %rax
 	mov $1, %rdi
-	mov %r10, %rdx
+	lea \label, %rsi
+	mov \len, %rdx
 	syscall
+.endm
+
+.macro Println label, len
+	Print \label, \len
 
 	# add newline
 	mov $1, %rax
-	movb $'\n', (%r8)
+	lea newline, %r9
 	mov $1, %rdx
 	syscall
+.endm
 
+.equ Cmd, 0
+.equ Argv, 16
+
+_start:
+	lea -128(%rsp), %r9 # legal red zone is rsp - 1 to rsp - 128
+
+reset:
+	# set ymm0 = 0
+	vpxor %ymm0, %ymm0, %ymm0
+
+	# set ymm1 = 0xFF...FF
+	mov $0xFF, %r10
+	pinsrb $0, %r10, %xmm1
+	vpbroadcastb %xmm1, %ymm1
+
+	mov $0, %r10
+
+parse:
+	Print prompt, $4
+	Read %xmm0, %xmm1, %r10
+	vmovdqu %xmm0, (%r9) # write ymm0
+
+	# argv[0] = %r9 (cmd)
+	# argv[1] = NULL
+	mov %r9, 16(%r9)
+	movq $0, 24(%r9)
+
+	# execve()
+	mov $59, %rax
+	lea Cmd(%r9), %rdi # name
+	lea Argv(%r9), %rsi # argv
+	mov %r8, %rdx # copy envp
+	syscall
+
+	cmpq $0, %rax
+	jge reset
+
+error:
+	Print errmsg, $6
 	jmp reset
 
 end:
 	mov $60, %rax
 	xor %rdi, %rdi
 	syscall
+
+errmsg:
+	.asciz "what?\n"
+
+prompt:
+	.asciz "-> "
+
+newline:
+	.byte '\n'
 
