@@ -11,6 +11,16 @@
 # to run:
 # $ clang -nostdlib smdsh.s -o smdsh && ./smdsh
 
+# commands:
+# $ version
+# $ exit
+# <absolute path to executable>
+
+# TODO:
+# arg support
+# wait() on parent
+# checking stuff in PATH
+
 # memory I can use:
 # x86 registers, r8 - r15
 # SSE/AVX/AVX2 registers (don't have AVX512)
@@ -33,21 +43,13 @@
 .equ Smd_imm_bit_mask, 0
 .equ Smd_imm_uint_mask, 64
 
-# ecx: int argc
-# rdx: char **argv
-# r8: char **env
-
-# lldb:
-# find addr: disas -n <label>
-# print reg: reg read <reg>
-
 .global _start
 
 .text
 
-# read text into str (*MM), putting reverse mask in mask (*MM) and number of chars in count (GPR)
-.macro Read str, mask, count
-read\@:
+# read text into str (*mm), putting reverse mask in mask (*mm) and number of chars in count (gpr)
+.macro Read str, mask, count, is_cmd
+L0_\@:
 	# read()
 	mov $0, %rax
 	mov $0, %rdi
@@ -65,26 +67,41 @@ read\@:
 
 	# increment and wrap index
 	inc \count
-	and $0x1F, \count
+
+	# test if out of space in str
+	cmp $16, \count
+	jz L2_\@
 
 	# test for \n, \t, space (done with command)
 	cmpb $'\n', (%r9)
-	jz strip\@
+	jz L1_\@
 
+.if \is_cmd > 0
 	cmpb $'\t', (%r9)
-	jz strip\@
+	jz L1_\@
 
 	cmpb $' ', (%r9)
-	jz strip\@
+	jz L1_\@
+.endif
 
-	jmp read\@
+	jmp L0_\@
 
-strip\@:
+L1_\@:
 	# un-get break token
 	vpsrldq $1, \str, \str
 	vpsrldq $1, \mask, \mask # TODO: introduces garbage in xmm1 because this is logical, not arith
 
 	vpshufb \mask, \str, \str # reverse *mm0 using ymm1 mask and zero unused chars
+
+L2_\@:
+.endm
+
+.macro Read_arg str, mask, count
+	cmp $16, \count
+	jl end\@
+	mov $0, \count
+	Read \str, \mask, \count, 0
+	end\@:
 .endm
 
 .macro Print label, len
@@ -111,66 +128,94 @@ strip\@:
 	jnb \dst # jmp if CF = 0, CF = 0 if bytes in string differ
 .endm
 
-.equ Cmd, 0
-.equ Argv, 16
+# red zone memory map
+
+# space to store command and args
+.equ Argv_0, 0
+.equ Argv_1, 16
+.equ Argv_2, 32
+.equ Argv_3, 48
+.equ Argv_4, 64
+
+# table of *argv elements
+.equ Argv_ptr, 80
 
 _start:
 	lea -128(%rsp), %r9 # legal red zone is rsp - 1 to rsp - 128
 
+	# find **env and put in r8
+	mov (%rsp), %r8 # get argc
+	lea 16(%rsp, %r8, 8), %r8 # put 16 + (rsp + r8 * 8) (**env) in r8
+	mov (%r8), %r8 # put *env in r8
+
 reset:
-	# set ymm0 = 0
-	vpxor %ymm0, %ymm0, %ymm0
+	.irp i, 0, 1, 2, 3, 4
+		vpxor %xmm\i, %xmm\i, %xmm\i
+	.endr
 
-	# set ymm1 = 0xFF...FF
+	# set xmm1 = 0xFF...FF
 	mov $0xFF, %r10
-	pinsrb $0, %r10, %xmm1
-	vpbroadcastb %xmm1, %ymm1
+	pinsrb $0, %r10, %xmm7
+	vpbroadcastb %xmm7, %xmm7
 
+	# zero out lengths
 	mov $0, %r10
+	mov $0, %r11
 
 parse:
-	Print prompt, $3
-	Read %xmm0, %xmm1, %r10
+	Print prompt, $(prompt_end - prompt)
+	Read %xmm0, %xmm7, %r10, 1
 
-check:
+	# read 64 bytes of args
+	.irp i, 1, 2, 3, 4
+		Read_arg %xmm\i, %xmm7, %r10
+	.endr
+
+try_builtin:
 	# handle builtins
 	Jmp_str %xmm0, cmd_version, version
 	Jmp_str %xmm0, cmd_exit, exit
 
-	# 0. check for avx2
-	# 1. parse based on PATH
-	# 3. use fork
-	# 4. compress argv usage
-	# 5. expand ~
-	# 6. test, debug, and stop (do grad apps)
+try_exec:
+	.irp i, 0, 1, 2, 3, 4
+		vmovdqu %xmm\i, Argv_\i(%r9)
+	.endr
 
-	vmovdqu %xmm0, (%r9) # write xmm0
+	# TODO: assign args to argv array
 
-	# argv[0] = %r9 (cmd)
-	# argv[1] = NULL
-	mov %r9, Argv(%r9)
-	movq $0, 24(%r9)
+	mov %r9, Argv_ptr(%r9)
+	movq $0, (Argv_ptr + 8)(%r9)
 
-	# execve()
-	mov $59, %rax
-	lea Cmd(%r9), %rdi # name
-	lea Argv(%r9), %rsi # argv
-	mov %r8, %rdx # copy envp
+	# fork()
+	mov $57, %rax
 	syscall
 
-	jmp error
+	# if child, call exec()
+	cmp $0, %rax
+	jz do_exec
 
-version:
-	Print ver_msg, $(ver_msg_end - ver_msg)
-	jmp reset
+wait_exec:
+	# TODO: call into linux headers to use wait4
+	jmp exit
+
+do_exec:
+	# execve()
+	mov $59, %rax
+	lea Argv_0(%r9), %rdi # create *filename
+	lea Argv_ptr(%r9), %rsi # create **argv
+	mov $0, %rdx # no environment variables because there's no way we would be able to write them all
+	syscall
+
+	Print err_msg, $(err_msg_end - err_msg)
+	jmp exit # don't want to depend on exit being first builtin
 
 exit:
 	mov $60, %rax
 	xor %rdi, %rdi
 	syscall
 
-error:
-	Print err_msg, $6
+version:
+	Print ver_msg, $(ver_msg_end - ver_msg)
 	jmp reset
 
 cmd_version:
