@@ -37,6 +37,7 @@
 .equ Smd_imm_cmp_eq_each, 8 # strcmp
 .equ Smd_imm_cmp_eq_order, 12 # substring search
 .equ Smd_imm_neg_pol, 16
+.equ Smd_imm_mask_end, 32 # ignore results past the end of the string
 .equ Smd_imm_mask_neg_pol, 48
 .equ Smd_imm_least_sig, 0
 .equ Smd_imm_most_sig, 64
@@ -65,7 +66,7 @@ L0_\@:
 	vpslldq $1, \str, \str
 	pinsrb $0, (%r9), \str
 
-	# increment and wrap index
+	# increment index
 	inc \count
 
 	# test if out of space in str
@@ -96,6 +97,7 @@ L1_\@:
 L2_\@:
 .endm
 
+# reads an argument (if all arguments have not been read)
 .macro Read_arg str, mask, count
 	cmp $16, \count
 	jl end\@
@@ -123,9 +125,20 @@ L2_\@:
 	syscall
 .endm
 
+# jumps to dst if str != cmp
 .macro Jmp_str str, cmp, dst
-	pcmpistri $Smd_imm_cmp_eq_each + Smd_imm_neg_pol, \cmp, \str
+	pcmpistri $Smd_imm_cmp_eq_each + Smd_imm_mask_end + Smd_imm_neg_pol, \cmp, \str
 	jnb \dst # jmp if CF = 0, CF = 0 if bytes in string differ
+.endm
+
+# sets ecx to address of first occurrance of sub (xmm) in str (xmm)
+# rcx set to -1 if no substring is found
+.macro Str_str sub, str
+	pcmpistri $Smd_imm_cmp_eq_order + Smd_imm_mask_end, \sub, \str
+	cmp $16, %ecx
+	jnz L1
+	mov $-1, %rcx
+L1:
 .endm
 
 # red zone memory map
@@ -164,6 +177,8 @@ reset:
 
 parse:
 	Print prompt, $(prompt_end - prompt)
+
+	# read 16 bytes of cmd
 	Read %xmm0, %xmm7, %r10, 1
 
 	# read 64 bytes of args
@@ -177,9 +192,16 @@ try_builtin:
 	Jmp_str %xmm0, cmd_exit, exit
 
 try_exec:
+	# write out cmd and args
 	.irp i, 0, 1, 2, 3, 4
 		vmovdqu %xmm\i, Argv_\i(%r9)
 	.endr
+
+	movdqu space_str, %xmm7
+
+	# mask a reg?
+
+	Str_str %xmm0, %xmm7
 
 	# TODO: assign args to argv array
 
@@ -187,8 +209,9 @@ try_exec:
 	movq $0, (Argv_ptr + 8)(%r9)
 
 	# fork()
-	mov $57, %rax
-	syscall
+	#mov $57, %rax
+	#syscall
+	mov $0, %rax
 
 	# if child, call exec()
 	cmp $0, %rax
@@ -206,6 +229,9 @@ do_exec:
 	mov $0, %rdx # no environment variables because there's no way we would be able to write them all
 	syscall
 
+	# find PATH in by traversing *r8 (array of C strings)
+	# try everything in there
+
 	Print err_msg, $(err_msg_end - err_msg)
 	jmp exit # don't want to depend on exit being first builtin
 
@@ -220,6 +246,7 @@ version:
 
 cmd_version:
 	.asciz "version"
+
 cmd_exit:
 	.asciz "exit"
 
@@ -234,6 +261,9 @@ prompt_end:
 ver_msg:
 	.asciz "smdsh v0.1\n"
 ver_msg_end:
+
+space_msg:
+	.asciz " "
 
 newline:
 	.byte '\n'
