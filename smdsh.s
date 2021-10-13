@@ -14,12 +14,7 @@
 # commands:
 # $ version
 # $ exit
-# <absolute path to executable>
-
-# TODO:
-# arg support
-# wait() on parent
-# checking stuff in PATH
+# $ <absolute path to executable> <args>
 
 # memory I can use:
 # x86 registers, r8 - r15
@@ -48,8 +43,17 @@
 
 .text
 
+# fills xmm with fill (gpr)
+.macro Reset_xmm_mask xmm, fill
+	mov $0xFF, \fill
+	pinsrb $0, \fill, \xmm
+	vpbroadcastb \xmm, \xmm
+.endm
+
 # read text into str (*mm), putting reverse mask in mask (*mm) and number of chars in count (gpr)
-.macro Read str, mask, count, is_cmd
+.macro Read str, mask, count, take_single_word
+	Reset_xmm_mask \mask, %r10
+	mov $0, \count
 L0_\@:
 	# read()
 	mov $0, %rax
@@ -77,7 +81,7 @@ L0_\@:
 	cmpb $'\n', (%r9)
 	jz L1_\@
 
-.if \is_cmd > 0
+.if \take_single_word > 0
 	cmpb $'\t', (%r9)
 	jz L1_\@
 
@@ -90,19 +94,17 @@ L0_\@:
 L1_\@:
 	# un-get break token
 	vpsrldq $1, \str, \str
-	vpsrldq $1, \mask, \mask # TODO: introduces garbage in xmm1 because this is logical, not arith
-
-	vpshufb \mask, \str, \str # reverse *mm0 using ymm1 mask and zero unused chars
+	vpsrldq $1, \mask, \mask # NOTE: introduces garbage in xmm1 because this is logical, not arith
 
 L2_\@:
+	vpshufb \mask, \str, \str # reverse str using mask and zero unused chars
 .endm
 
 # reads an argument (if all arguments have not been read)
 .macro Read_arg str, mask, count
-	cmp $16, \count
-	jl end\@
-	mov $0, \count
-	Read \str, \mask, \count, 0
+	cmpb $'\n', (%r9)
+	jz end\@
+	Read \str, \mask, \count, 1
 	end\@:
 .endm
 
@@ -115,19 +117,9 @@ L2_\@:
 	syscall
 .endm
 
-.macro Println label, len
-	Print \label, \len
-
-	# write()
-	mov $1, %rax
-	lea newline, %r9
-	mov $1, %rdx
-	syscall
-.endm
-
 # jumps to dst if str != cmp
 .macro Jmp_str str, cmp, dst
-	pcmpistri $Smd_imm_cmp_eq_each + Smd_imm_mask_end + Smd_imm_neg_pol, \cmp, \str
+	pcmpistri $Smd_imm_cmp_eq_each + Smd_imm_neg_pol, \cmp, \str
 	jnb \dst # jmp if CF = 0, CF = 0 if bytes in string differ
 .endm
 
@@ -135,10 +127,6 @@ L2_\@:
 # rcx set to -1 if no substring is found
 .macro Str_str sub, str
 	pcmpistri $Smd_imm_cmp_eq_order + Smd_imm_mask_end, \sub, \str
-	cmp $16, %ecx
-	jnz L1
-	mov $-1, %rcx
-L1:
 .endm
 
 # red zone memory map
@@ -148,10 +136,9 @@ L1:
 .equ Argv_1, 16
 .equ Argv_2, 32
 .equ Argv_3, 48
-.equ Argv_4, 64
 
 # table of *argv elements
-.equ Argv_ptr, 80
+.equ Argv_ptr, 64
 
 _start:
 	lea -128(%rsp), %r9 # legal red zone is rsp - 1 to rsp - 128
@@ -162,18 +149,9 @@ _start:
 	mov (%r8), %r8 # put *env in r8
 
 reset:
-	.irp i, 0, 1, 2, 3, 4
+	.irp i, 0, 1, 2, 3
 		vpxor %xmm\i, %xmm\i, %xmm\i
 	.endr
-
-	# set xmm1 = 0xFF...FF
-	mov $0xFF, %r10
-	pinsrb $0, %r10, %xmm7
-	vpbroadcastb %xmm7, %xmm7
-
-	# zero out lengths
-	mov $0, %r10
-	mov $0, %r11
 
 parse:
 	Print prompt, $(prompt_end - prompt)
@@ -181,32 +159,39 @@ parse:
 	# read 16 bytes of cmd
 	Read %xmm0, %xmm7, %r10, 1
 
-	# read 64 bytes of args
-	.irp i, 1, 2, 3, 4
-		Read_arg %xmm\i, %xmm7, %r10
-	.endr
+	# read up to 48 more bytes of arg if required
+	Read_arg %xmm1, %xmm7, %r10
+	Read_arg %xmm2, %xmm7, %r10
+	Read_arg %xmm3, %xmm7, %r10
 
 try_builtin:
 	# handle builtins
 	Jmp_str %xmm0, cmd_version, version
 	Jmp_str %xmm0, cmd_exit, exit
 
-try_exec:
+write_argv:
 	# write out cmd and args
-	.irp i, 0, 1, 2, 3, 4
+	.irp i, 0, 1, 2, 3
 		vmovdqu %xmm\i, Argv_\i(%r9)
 	.endr
 
-	movdqu space_str, %xmm7
-
-	# mask a reg?
-
-	Str_str %xmm0, %xmm7
-
-	# TODO: assign args to argv array
+	# set ecx to index of first occurrance of xmm7 in xmm0
+	# pcmpistri $Smd_imm_cmp_eq_order + Smd_imm_mask_end, %xmm0, %xmm7
 
 	mov %r9, Argv_ptr(%r9)
-	movq $0, (Argv_ptr + 8)(%r9)
+	lea Argv_1(%r9), %r15
+
+	# write address to argv table if xmm reg is non zero
+	.irp i, 1, 2, 3
+		pextrb $0, %xmm\i, %r14
+		cmp $0, %r14
+		jz skip_\i
+		mov %r15, (Argv_ptr + \i * 8)(%r9)
+		skip_\i:
+		add $16, %r15
+	.endr
+
+	movq $0, (Argv_ptr + 32)(%r9)
 
 	# fork()
 	#mov $57, %rax
@@ -229,9 +214,26 @@ do_exec:
 	mov $0, %rdx # no environment variables because there's no way we would be able to write them all
 	syscall
 
-	# find PATH in by traversing *r8 (array of C strings)
-	# try everything in there
+	# try /bin/<exec>
+	mov $59, %rax
+	lea path_bin, %r15
+	vpslldq $5, %xmm0, %xmm0
+	pinsrd $0, (%r15), %xmm0
+	pinsrb $4, 4(%r15), %xmm0
+	vmovdqu %xmm0, Argv_0(%r9)
+	syscall
 
+	# try /usr/bin/<exec>
+	mov $59, %rax
+	lea path_usr_bin, %r15
+	vpsrldq $5, %xmm0, %xmm0
+	vpslldq $8, %xmm0, %xmm0
+	pinsrq $0, (%r15), %xmm0
+	pinsrb $8, 8(%r15), %xmm0
+	vmovdqu %xmm0, Argv_0(%r9)
+	syscall
+
+	# error out if all three tries failed
 	Print err_msg, $(err_msg_end - err_msg)
 	jmp exit # don't want to depend on exit being first builtin
 
@@ -265,6 +267,9 @@ ver_msg_end:
 space_msg:
 	.asciz " "
 
-newline:
-	.byte '\n'
+path_bin:
+	.asciz "/bin/"
+
+path_usr_bin:
+	.asciz "/usr/bin"
 
