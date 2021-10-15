@@ -1,7 +1,7 @@
 # shell entirely within AVX registers
 #
 # rules:
-# 1. no heap memory allocation (malloc, brk, mmap, etc)
+# 1. no heap memory allocation (malloc, brk, mmap, new processes, etc)
 # 2. no stack allocation (meaning the adjustment of rbp or rsp)
 #      a. red zones are fair game but vary by OS and architecture
 # 3. no calling libraries that violate rules 1 or 2 (including libc)
@@ -14,7 +14,10 @@
 # commands:
 # $ version
 # $ exit
-# $ <absolute path to executable> <args>
+# $ <path to executable> <args>
+# $ <something in /bin or /usr/bin> <args>
+
+# no environment variable support
 
 # memory I can use:
 # x86 registers, r8 - r15
@@ -168,6 +171,7 @@ try_builtin:
 	# handle builtins
 	Jmp_str %xmm0, cmd_version, version
 	Jmp_str %xmm0, cmd_exit, exit
+	Jmp_str %xmm0, cmd_cd, cd
 
 write_argv:
 	# write out cmd and args
@@ -175,43 +179,56 @@ write_argv:
 		vmovdqu %xmm\i, Argv_\i(%r9)
 	.endr
 
-	# set ecx to index of first occurrance of xmm7 in xmm0
-	# pcmpistri $Smd_imm_cmp_eq_order + Smd_imm_mask_end, %xmm0, %xmm7
-
 	mov %r9, Argv_ptr(%r9)
 	lea Argv_1(%r9), %r15
 
-	# write address to argv table if xmm reg is non zero
+	# write xmm address to argv table if xmm reg is non zero
 	.irp i, 1, 2, 3
 		pextrb $0, %xmm\i, %r14
 		cmp $0, %r14
 		jz skip_\i
-		mov %r15, (Argv_ptr + \i * 8)(%r9)
-		skip_\i:
+		mov %r15, (Argv_ptr + \i * 8)(%r9) # fill argv address
+		jmp end_\i
+	skip_\i:
+		movq $0, (Argv_ptr + \i * 8)(%r9) # clear argv address (might have a stale address from last cmd)
+	end_\i:
 		add $16, %r15
 	.endr
 
 	movq $0, (Argv_ptr + 32)(%r9)
 
+is_parent:
 	# fork()
-	#mov $57, %rax
-	#syscall
-	mov $0, %rax
+	mov $57, %rax
+	syscall
+	#mov $0, %rax
 
 	# if child, call exec()
 	cmp $0, %rax
 	jz do_exec
 
 wait_exec:
-	# TODO: call into linux headers to use wait4
-	jmp exit
+	# int waitid(int which, pid_t upid, <*struct>, int options, <*struct>)
+	mov $247, %rax
+	mov $0, %rdi # P_ALL (wait for any child to return, ignore upid)
+	mov $0, %rsi # ignored because of P_ALL
+	mov $0, %rdx # NULL struct ptr
+	mov $4, %r10 # WEXITED (check which children exited)
+	mov %r8, %r15 # save r8
+	mov $0, %r8 # NULL struct ptr
+	syscall
+
+	mov %r15, %r8 # restore r8
+	jmp reset
 
 do_exec:
-	# execve()
+	# try cmd itself with execve()
 	mov $59, %rax
 	lea Argv_0(%r9), %rdi # create *filename
 	lea Argv_ptr(%r9), %rsi # create **argv
-	mov $0, %rdx # no environment variables because there's no way we would be able to write them all
+
+	# no environment variables because there's no way we would be able to write a table for em all
+	mov $0, %rdx
 	syscall
 
 	# try /bin/<exec>
@@ -235,7 +252,11 @@ do_exec:
 
 	# error out if all three tries failed
 	Print err_msg, $(err_msg_end - err_msg)
-	jmp exit # don't want to depend on exit being first builtin
+
+	# exit()
+	mov $60, %rax
+	mov $1, %rdi
+	syscall
 
 exit:
 	mov $60, %rax
@@ -246,18 +267,30 @@ version:
 	Print ver_msg, $(ver_msg_end - ver_msg)
 	jmp reset
 
+cd:
+	# chdir()
+	mov $80, %rax
+	movdqu %xmm1, Argv_1(%r9)
+	lea Argv_1(%r9), %rdi # new directory
+	syscall
+
+	jmp reset
+
 cmd_version:
 	.asciz "version"
 
 cmd_exit:
 	.asciz "exit"
 
+cmd_cd:
+	.asciz "cd"
+
 err_msg:
 	.asciz "what?\n"
 err_msg_end:
 
 prompt:
-	.asciz "$ "
+	.asciz "smdsh $ "
 prompt_end:
 
 ver_msg:
@@ -271,5 +304,5 @@ path_bin:
 	.asciz "/bin/"
 
 path_usr_bin:
-	.asciz "/usr/bin"
+	.asciz "/usr/bin/"
 
