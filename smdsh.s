@@ -13,17 +13,16 @@
 
 # memory I can use (assuming AVX2 support):
 # x86 registers, r8 - r15
-# xmm0 - xmm15, ymm0 - ymm15
+# xmm0 - xmm7, xmm8 - xmm15, ymm0 - ymm15
 # x87 float registers (or MMX registers)
 # x87 float control registers
 # 128-byte red zone after rsp
 
 # TODO:
-# fix '+' (reliability issues)
-# '-' to remove env vars
+# implement strstr, '+', '=', and '-'
 # reload: assembles launches itself
 # compress argvs
-# fix encodings
+# fix encodings (all VEX?)
 # clean up assembly (mov $0 -> xor, etc)
 
 # SSE string compare immediate bits
@@ -302,48 +301,27 @@ cd:
 	jmp reset
 
 eq:
-	mov Argv_env_0(%r9), %r15
-	Print env_0, $(env_0_end - env_0)
-	Print (%r15), $16
-	Print more, $(more_end - more)
-
-	mov Argv_env_1(%r9), %r15
-	Print env_1, $(env_1_end - env_1)
-	Print (%r15), $16
-	Print more, $(more_end - more)
-
+	# print out all env vars we're using
 	jmp reset
 
 plus:
-	mov %r8, %r15
-	Str_len %xmm1, %rax
-	mov $16, %rdx
+	jmp reset
 
 # read env bytes until we see our variable or we run out of bytes
 plus_try:
-	movdqu (%r15), %xmm7
-
-	pcmpestri $Smd_imm_cmp_eq_order, %xmm7, %xmm1 # check for xmm1 in xmm7
-	cmp $16, %ecx
-	jnz plus_var # found a variable
-
-	# TODO: this breaks
-	# TODO: handle case where var crosses xmm registers
-	cmpq $0, (%r15) # check if lots of 0s
-	jz plus_err
-
-	add $16, %r15
-	jmp plus_try
+	# if xmm1 in fragment: jmp to plus_var
+	# if out of fragments: jmp to plus_err
+	# increment string index and jmp to plus_try
 
 plus_var:
 	# var found
-	add %rcx, %r15 # update address in r15
-	mov %r15, Argv_env_0(%r9)
+	# mov ??, Argv_env_0(%r9)
 
 	jmp reset
 
 plus_err:
 	# var not found
+
 	Print plus_err_msg, $(plus_err_msg_end - plus_err_msg)
 	jmp reset
 
@@ -384,18 +362,6 @@ cmd_plus:
 
 cmd_eq:
 	.asciz "="
-
-env_0:
-	.asciz "0: \""
-env_0_end:
-
-env_1:
-	.asciz "1: \""
-env_1_end:
-
-more:
-	.asciz "\"...\n"
-more_end:
 
 plus_err_msg:
 	.asciz "environment variable not found!\n"
