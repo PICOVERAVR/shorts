@@ -11,19 +11,21 @@
 # to run:
 # $ clang -nostdlib smdsh.s -o smdsh && ./smdsh
 
-# commands:
-# $ version
-# $ exit
-# $ <path to executable> <args>
-# $ <something in /bin or /usr/bin> <args>
-
-# no environment variable support
-
-# memory I can use:
+# memory I can use (assuming AVX2 support):
 # x86 registers, r8 - r15
-# SSE/AVX/AVX2 registers (don't have AVX512)
-# x87 float registers (8, can use FILD/FIST to load/store integers)
+# xmm0 - xmm15, ymm0 - ymm15
+# x87 float registers (or MMX registers)
+# x87 float control registers
 # 128-byte red zone after rsp
+
+# TODO:
+# fix '+' (works in lldb but not in real life...)
+# list env vars
+# remove env vars
+# reload: assembles launches itself
+# compress argvs
+# fix encodings
+# clean up assembly (mov $0 -> xor, etc)
 
 # SSE string compare immediate bits
 .equ Smd_imm_ubyte_op, 0
@@ -41,6 +43,18 @@
 .equ Smd_imm_most_sig, 64
 .equ Smd_imm_bit_mask, 0
 .equ Smd_imm_uint_mask, 64
+
+# red zone memory map
+
+# space to store command and args
+.equ Argv_0, 0
+.equ Argv_1, 16
+.equ Argv_2, 32
+.equ Argv_3, 48
+.equ Argv_ptr, 64 # table of 4 *argv elements + NULL
+.equ Argv_ptr_end, 96
+.equ Argv_env, 104 # table of 4 *env elements + NULL
+.equ Argv_env_end, 120
 
 .global _start
 
@@ -126,22 +140,28 @@ L2_\@:
 	jnb \dst # jmp if CF = 0, CF = 0 if bytes in string differ
 .endm
 
-# sets ecx to address of first occurrance of sub (xmm) in str (xmm)
-# rcx set to -1 if no substring is found
-.macro Str_str sub, str
-	pcmpistri $Smd_imm_cmp_eq_order + Smd_imm_mask_end, \sub, \str
+# puts length of str in out, trashing xmm6
+.macro Str_len str, out
+	mov $16, %rdx
+	lea xmm_null, %rax
+	movdqu (%rax), %xmm6
+	mov $1, %rax
+	pcmpestri $Smd_imm_cmp_eq_any, \str, %xmm6
+	mov %rcx, \out
 .endm
 
-# red zone memory map
+# sets ecx to address of first occurrance of sub (xmm/mem) in str (xmm),
+# with sub_len and sub holding string lengths
+#.macro Exp_str_str sub, sub_len, str, str_len
+#	mov \sub_len, %rdx
+#	mov \str_len, %rax
+#	# ecx set to 16 if no match found
+#	pcmpestri $Smd_imm_cmp_eq_order + Smd_imm_mask_end, \str, \sub
+#.endm
 
-# space to store command and args
-.equ Argv_0, 0
-.equ Argv_1, 16
-.equ Argv_2, 32
-.equ Argv_3, 48
 
-# table of *argv elements
-.equ Argv_ptr, 64
+# str_str but ignore after NULL:
+# pcmpistri $Smd_imm_cmp_eq_order + Smd_imm_mask_end, \str, \sub
 
 _start:
 	lea -128(%rsp), %r9 # legal red zone is rsp - 1 to rsp - 128
@@ -169,9 +189,11 @@ parse:
 
 try_builtin:
 	# handle builtins
+	Jmp_str %xmm0, cmd_help, help
 	Jmp_str %xmm0, cmd_version, version
 	Jmp_str %xmm0, cmd_exit, exit
 	Jmp_str %xmm0, cmd_cd, cd
+	Jmp_str %xmm0, cmd_plus, plus
 
 write_argv:
 	# write out cmd and args
@@ -195,7 +217,8 @@ write_argv:
 		add $16, %r15
 	.endr
 
-	movq $0, (Argv_ptr + 32)(%r9)
+	movq $0, (Argv_ptr_end)(%r9)
+	movq $0, (Argv_env_end)(%r9)
 
 is_parent:
 	# fork()
@@ -226,9 +249,7 @@ do_exec:
 	mov $59, %rax
 	lea Argv_0(%r9), %rdi # create *filename
 	lea Argv_ptr(%r9), %rsi # create **argv
-
-	# no environment variables because there's no way we would be able to write a table for em all
-	mov $0, %rdx
+	lea Argv_env(%r9), %rdx # create **env
 	syscall
 
 	# try /bin/<exec>
@@ -258,14 +279,18 @@ do_exec:
 	mov $1, %rdi
 	syscall
 
-exit:
-	mov $60, %rax
-	xor %rdi, %rdi
-	syscall
+help:
+	Print help_msg, $(help_msg_end - help_msg)
+	jmp reset
 
 version:
 	Print ver_msg, $(ver_msg_end - ver_msg)
 	jmp reset
+
+exit:
+	mov $60, %rax
+	xor %rdi, %rdi
+	syscall
 
 cd:
 	# chdir()
@@ -276,14 +301,78 @@ cd:
 
 	jmp reset
 
+plus:
+	mov %r8, %r15
+	Str_len %xmm1, %rax
+	mov $16, %rdx
+	# TODO: append '=' to xmm1 to avoid partial matches with stuff
+
+# read env bytes until we see our variable or we run out of bytes
+plus_try:
+	movdqu (%r15), %xmm7
+
+	pcmpestri $Smd_imm_cmp_eq_order, %xmm7, %xmm1 # check for xmm1 in xmm7
+	cmp $16, %ecx
+	jnz plus_var # found a variable
+
+	# TODO: this probably breaks - check env behavior
+	cmpq $0, (%r15) # check if lots of 0s
+	jz plus_err
+
+	add $16, %r15
+	jmp plus_try
+
+plus_var:
+	# var found
+	add %rcx, %r15 # update address in r15
+	mov %r15, Argv_env(%r9)
+
+	Print (%r15), $16
+
+	jmp reset
+
+plus_err:
+	# var not found
+	Print plus_err_msg, $(plus_err_msg_end - plus_err_msg)
+	jmp reset
+
+cmd_help:
+	.asciz "help"
+
+help_msg:
+	.ascii "SIMD shell\n\n"
+	.ascii "A shell that doesn't rely on stack or heap allocation."
+	.ascii " Keep commands short.\n\n"
+
+	.ascii "commands:\n"
+	.ascii "version: print version\n"
+	.ascii "exit: exit the shell\n"
+	.ascii "help: show this help menu\n"
+
+	.ascii "+ <environment variable>: pass this variable inside the shell (up to 4 variables supported)\n"
+
+	.asciz "\n"
+help_msg_end:
+
 cmd_version:
 	.asciz "version"
+
+ver_msg:
+	.ascii "smdsh v0.1\n"
+ver_msg_end:
 
 cmd_exit:
 	.asciz "exit"
 
 cmd_cd:
 	.asciz "cd"
+
+cmd_plus:
+	.asciz "+"
+
+plus_err_msg:
+	.asciz "environment variable not found!\n"
+plus_err_msg_end:
 
 err_msg:
 	.asciz "what?\n"
@@ -293,10 +382,6 @@ prompt:
 	.asciz "smdsh $ "
 prompt_end:
 
-ver_msg:
-	.asciz "smdsh v0.1\n"
-ver_msg_end:
-
 space_msg:
 	.asciz " "
 
@@ -305,4 +390,8 @@ path_bin:
 
 path_usr_bin:
 	.asciz "/usr/bin/"
+
+xmm_null:
+	.quad 0
+	.quad 0
 
