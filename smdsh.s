@@ -19,9 +19,8 @@
 # 128-byte red zone after rsp
 
 # TODO:
-# fix '+' (works in lldb but not in real life...)
-# list env vars
-# remove env vars
+# fix '+' (reliability issues)
+# '-' to remove env vars
 # reload: assembles launches itself
 # compress argvs
 # fix encodings
@@ -53,7 +52,8 @@
 .equ Argv_3, 48
 .equ Argv_ptr, 64 # table of 4 *argv elements + NULL
 .equ Argv_ptr_end, 96
-.equ Argv_env, 104 # table of 4 *env elements + NULL
+.equ Argv_env_0, 104 # table of 2 *env elements + NULL
+.equ Argv_env_1, 112
 .equ Argv_env_end, 120
 
 .global _start
@@ -159,7 +159,6 @@ L2_\@:
 #	pcmpestri $Smd_imm_cmp_eq_order + Smd_imm_mask_end, \str, \sub
 #.endm
 
-
 # str_str but ignore after NULL:
 # pcmpistri $Smd_imm_cmp_eq_order + Smd_imm_mask_end, \str, \sub
 
@@ -194,6 +193,7 @@ try_builtin:
 	Jmp_str %xmm0, cmd_exit, exit
 	Jmp_str %xmm0, cmd_cd, cd
 	Jmp_str %xmm0, cmd_plus, plus
+	Jmp_str %xmm0, cmd_eq, eq
 
 write_argv:
 	# write out cmd and args
@@ -249,7 +249,7 @@ do_exec:
 	mov $59, %rax
 	lea Argv_0(%r9), %rdi # create *filename
 	lea Argv_ptr(%r9), %rsi # create **argv
-	lea Argv_env(%r9), %rdx # create **env
+	lea Argv_env_0(%r9), %rdx # create **env
 	syscall
 
 	# try /bin/<exec>
@@ -301,11 +301,23 @@ cd:
 
 	jmp reset
 
+eq:
+	mov Argv_env_0(%r9), %r15
+	Print env_0, $(env_0_end - env_0)
+	Print (%r15), $16
+	Print more, $(more_end - more)
+
+	mov Argv_env_1(%r9), %r15
+	Print env_1, $(env_1_end - env_1)
+	Print (%r15), $16
+	Print more, $(more_end - more)
+
+	jmp reset
+
 plus:
 	mov %r8, %r15
 	Str_len %xmm1, %rax
 	mov $16, %rdx
-	# TODO: append '=' to xmm1 to avoid partial matches with stuff
 
 # read env bytes until we see our variable or we run out of bytes
 plus_try:
@@ -315,7 +327,8 @@ plus_try:
 	cmp $16, %ecx
 	jnz plus_var # found a variable
 
-	# TODO: this probably breaks - check env behavior
+	# TODO: this breaks
+	# TODO: handle case where var crosses xmm registers
 	cmpq $0, (%r15) # check if lots of 0s
 	jz plus_err
 
@@ -325,9 +338,7 @@ plus_try:
 plus_var:
 	# var found
 	add %rcx, %r15 # update address in r15
-	mov %r15, Argv_env(%r9)
-
-	Print (%r15), $16
+	mov %r15, Argv_env_0(%r9)
 
 	jmp reset
 
@@ -349,7 +360,8 @@ help_msg:
 	.ascii "exit: exit the shell\n"
 	.ascii "help: show this help menu\n"
 
-	.ascii "+ <environment variable>: pass this variable inside the shell (up to 4 variables supported)\n"
+	.ascii "+ <search>: pass the environment string starting with term <search> to commands executed\n"
+	.ascii "=: list stored environment variables\n"
 
 	.asciz "\n"
 help_msg_end:
@@ -370,12 +382,27 @@ cmd_cd:
 cmd_plus:
 	.asciz "+"
 
+cmd_eq:
+	.asciz "="
+
+env_0:
+	.asciz "0: \""
+env_0_end:
+
+env_1:
+	.asciz "1: \""
+env_1_end:
+
+more:
+	.asciz "\"...\n"
+more_end:
+
 plus_err_msg:
 	.asciz "environment variable not found!\n"
 plus_err_msg_end:
 
 err_msg:
-	.asciz "what?\n"
+	.asciz "cannot locate executable!\n"
 err_msg_end:
 
 prompt:
