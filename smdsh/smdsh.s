@@ -20,7 +20,7 @@
 
 # TODO:
 # implement strstr, '+', '=', and '-'
-# reload: assembles launches itself
+# reload: assembles and launches itself, ship source as .ascii
 # compress argvs
 # fix encodings (all VEX?)
 # clean up assembly (mov $0 -> xor, etc)
