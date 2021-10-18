@@ -25,6 +25,23 @@
 # fix encodings (all VEX?)
 # clean up assembly (mov $0 -> xor, etc)
 
+# SSE string compare immediate bits
+.equ Smd_imm_ubyte_op, 0
+.equ Smd_imm_uword_op, 1
+.equ Smd_imm_sbyte_op, 2
+.equ Smd_imm_sword_op, 3
+.equ Smd_imm_cmp_eq_any, 0 # find any char in set in string
+.equ Smd_imm_cmp_range, 4 # comparing "az" means all chars from a to z
+.equ Smd_imm_cmp_eq_each, 8 # strcmp
+.equ Smd_imm_cmp_eq_order, 12 # substring search
+.equ Smd_imm_neg_pol, 16
+.equ Smd_imm_mask_end, 32 # ignore results past the end of the string
+.equ Smd_imm_mask_neg_pol, 48
+.equ Smd_imm_least_sig, 0
+.equ Smd_imm_most_sig, 64
+.equ Smd_imm_bit_mask, 0
+.equ Smd_imm_uint_mask, 64
+
 # red zone memory map
 
 # space to store command and args
@@ -42,23 +59,18 @@
 
 .text
 
-# fills xmm with val, fill (gpr) clobbered
-.macro Reset_xmm_mask xmm, fill, val
-	mov \val, \fill
+# fills xmm with fill (gpr)
+.macro Reset_xmm_mask xmm, fill
+	mov $0xFF, \fill
 	pinsrb $0, \fill, \xmm
 	vpbroadcastb \xmm, \xmm
 .endm
 
-# read text into str (xmm), clobbering mask (xmm) and returning number of chars in count (gpr)
-.macro Read str, mask, count
-	Reset_xmm_mask \mask, \count, $0xFF
+# read text into str (*mm), putting reverse mask in mask (*mm) and number of chars in count (gpr)
+.macro Read str, mask, count, take_single_word
+	Reset_xmm_mask \mask, %r10
 	mov $0, \count
-
 L0_\@:
-	# test for \n (done with command)
-	cmpb $'\n', (%r9)
-	jz L1_\@
-
 	# read()
 	mov $0, %rax
 	mov $0, %rdi
@@ -81,15 +93,35 @@ L0_\@:
 	cmp $16, \count
 	jz L2_\@
 
+	# test for \n, \t, space (done with command)
+	cmpb $'\n', (%r9)
+	jz L1_\@
+
+.if \take_single_word > 0
+	cmpb $'\t', (%r9)
+	jz L1_\@
+
+	cmpb $' ', (%r9)
+	jz L1_\@
+.endif
+
 	jmp L0_\@
 
 L1_\@:
 	# un-get break token
 	vpsrldq $1, \str, \str
-	vpsrldq $1, \mask, \mask # NOTE: introduces garbage in str because this is logical, not arith
+	vpsrldq $1, \mask, \mask # NOTE: introduces garbage in xmm1 because this is logical, not arith
 
 L2_\@:
 	vpshufb \mask, \str, \str # reverse str using mask and zero unused chars
+.endm
+
+# reads an argument (if all arguments have not been read)
+.macro Read_arg str, mask, count
+	cmpb $'\n', (%r9)
+	jz end\@
+	Read \str, \mask, \count, 1
+	end\@:
 .endm
 
 .macro Print label, len
@@ -101,19 +133,33 @@ L2_\@:
 	syscall
 .endm
 
-# finds the index of the first char in mm (xmm/ymm) and writes idx with the result
-.macro Find_idx mem, mm, idx
-	lea \mem, \idx
-	vpcmpeqb (\idx), \mm, %xmm7
-	vpmovmskb %xmm7, \idx
-	bsf \idx, \idx
-.endm
-
 # jumps to dst if str != cmp
 .macro Jmp_str str, cmp, dst
-	pcmpistri $0x18, \cmp, \str
+	pcmpistri $Smd_imm_cmp_eq_each + Smd_imm_neg_pol, \cmp, \str
 	jnb \dst # jmp if CF = 0, CF = 0 if bytes in string differ
 .endm
+
+# puts length of str in out, trashing xmm6
+.macro Str_len str, out
+	mov $16, %rdx
+	lea xmm_null, %rax
+	movdqu (%rax), %xmm6
+	mov $1, %rax
+	pcmpestri $Smd_imm_cmp_eq_any, \str, %xmm6
+	mov %rcx, \out
+.endm
+
+# sets ecx to address of first occurrance of sub (xmm/mem) in str (xmm),
+# with sub_len and sub holding string lengths
+#.macro Exp_str_str sub, sub_len, str, str_len
+#	mov \sub_len, %rdx
+#	mov \str_len, %rax
+#	# ecx set to 16 if no match found
+#	pcmpestri $Smd_imm_cmp_eq_order + Smd_imm_mask_end, \str, \sub
+#.endm
+
+# str_str but ignore after NULL:
+# pcmpistri $Smd_imm_cmp_eq_order + Smd_imm_mask_end, \str, \sub
 
 _start:
 	lea -128(%rsp), %r9 # legal red zone is rsp - 1 to rsp - 128
@@ -128,29 +174,16 @@ reset:
 		vpxor %xmm\i, %xmm\i, %xmm\i
 	.endr
 
-rd_cmd:
+parse:
 	Print prompt, $(prompt_end - prompt)
 
-	movb $0, (%r9) # clear newline from previous cmd
+	# read 16 bytes of cmd
+	Read %xmm0, %xmm7, %r10, 1
 
-	# use palignr to move xmm registers into ymm
-
-	vpxor %xmm6, %xmm6, %xmm6
-
-	# read up to 64 bytes of cmd
-	.irp i, 0, 1, 2, 3
-		Read %xmm\i, %xmm7, %r10
-
-		# replace spaces with null bytes
-		lea simd_space, %r11
-		vpcmpeqb (%r11), %xmm\i, %xmm7
-
-		# arg1: mask register
-		# arg2: written if mask >= 0x80
-		# arg3: written if mask < 0x80
-		# arg4: dest
-		vpblendvb %xmm7, %xmm6, %xmm\i, %xmm\i
-	.endr
+	# read up to 48 more bytes of arg if required
+	Read_arg %xmm1, %xmm7, %r10
+	Read_arg %xmm2, %xmm7, %r10
+	Read_arg %xmm3, %xmm7, %r10
 
 try_builtin:
 	# handle builtins
@@ -158,44 +191,31 @@ try_builtin:
 	Jmp_str %xmm0, cmd_version, version
 	Jmp_str %xmm0, cmd_exit, exit
 	Jmp_str %xmm0, cmd_cd, cd
+	Jmp_str %xmm0, cmd_plus, plus
+	Jmp_str %xmm0, cmd_eq, eq
 
 write_argv:
-	mov %r9, Argv_ptr(%r9) # set argv[0]
-	lea Argv_0(%r9), %r15 # r15 = argv[1]
-
-	lea simd_null, %r13
+	# write out cmd and args
 	.irp i, 0, 1, 2, 3
-		# write xmm to memory
 		vmovdqu %xmm\i, Argv_\i(%r9)
-
-		vpcmpeqb (%r13), %xmm\i, %xmm7
-		vpmovmskb %xmm7, %r14
-
-		lea Argv_1(%r9), %r10 # hold argv arr in r10
-
-	try_\i:
-		# TODO: r14 is never zero because of mask, but this check needs to be here or bsf
-		# returns undefined results.
-		cmp $0, %r14
-		jz write_end_argv
-
-		# find offset of null byte in mask, add to r15
-		bsf %r14, %rcx
-		add %rcx, %r15
-		inc %r15 # point to char after null ptr
-
-		shr %cl, %r14 # adjust mask
-
-		mov %r15, (%r10) # fill argv address
-		add $8, %r10
-
-		cmp %r10, Argv_ptr_end
-		jz write_end_argv
-
-		jmp try_\i # see if more mask bits exist
 	.endr
 
-write_end_argv:
+	mov %r9, Argv_ptr(%r9)
+	lea Argv_1(%r9), %r15
+
+	# write xmm address to argv table if xmm reg is non zero
+	.irp i, 1, 2, 3
+		pextrb $0, %xmm\i, %r14
+		cmp $0, %r14
+		jz skip_\i
+		mov %r15, (Argv_ptr + \i * 8)(%r9) # fill argv address
+		jmp end_\i
+	skip_\i:
+		movq $0, (Argv_ptr + \i * 8)(%r9) # clear argv address (might have a stale address from last cmd)
+	end_\i:
+		add $16, %r15
+	.endr
+
 	movq $0, (Argv_ptr_end)(%r9)
 	movq $0, (Argv_env_end)(%r9)
 
@@ -280,6 +300,31 @@ cd:
 
 	jmp reset
 
+eq:
+	# print out all env vars we're using
+	jmp reset
+
+plus:
+	jmp reset
+
+# read env bytes until we see our variable or we run out of bytes
+plus_try:
+	# if xmm1 in fragment: jmp to plus_var
+	# if out of fragments: jmp to plus_err
+	# increment string index and jmp to plus_try
+
+plus_var:
+	# var found
+	# mov ??, Argv_env_0(%r9)
+
+	jmp reset
+
+plus_err:
+	# var not found
+
+	Print plus_err_msg, $(plus_err_msg_end - plus_err_msg)
+	jmp reset
+
 cmd_help:
 	.asciz "help"
 
@@ -312,6 +357,16 @@ cmd_exit:
 cmd_cd:
 	.asciz "cd"
 
+cmd_plus:
+	.asciz "+"
+
+cmd_eq:
+	.asciz "="
+
+plus_err_msg:
+	.asciz "environment variable not found!\n"
+plus_err_msg_end:
+
 err_msg:
 	.asciz "cannot locate executable!\n"
 err_msg_end:
@@ -329,11 +384,7 @@ path_bin:
 path_usr_bin:
 	.asciz "/usr/bin/"
 
-# 32 zeros
-simd_null:
-	.fill 32, 1, 0
-
-# 32 newlines
-simd_space:
-	.fill 32, 1, ' '
+xmm_null:
+	.quad 0
+	.quad 0
 
