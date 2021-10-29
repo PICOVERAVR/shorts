@@ -27,8 +27,10 @@
 # red zone memory map
 
 # space to store command and args
-.equ Argv, 0
-.equ Argv_arg, 16
+.equ Argv_0, 0
+.equ Argv_1, 16
+.equ Argv_2, 32
+.equ Argv_3, 48
 .equ Argv_ptr, 64 # table of 4 *argv elements + NULL
 .equ Argv_ptr_end, 96
 .equ Argv_env_0, 104 # table of 2 *env elements + NULL
@@ -55,7 +57,7 @@
 	mov $0, \count
 
 L0_\@:
-	# test for break character (done with command)
+	# test for \n (done with command)
 	cmpb $'\n', (%r9)
 	jz L1_\@
 
@@ -81,13 +83,6 @@ L0_\@:
 	cmp $16, \count
 	jz L2_\@
 
-	# test for arg delimiters
-	cmpb $'\t', (%r9)
-	jz L1_\@
-
-	cmpb $' ', (%r9)
-	jz L1_\@
-
 	jmp L0_\@
 
 L1_\@:
@@ -104,10 +99,7 @@ L3_\@:
 
 # writes str (xmm) to the red zone and writes arg addresses into *argv table
 # increments str_idx (gpr) and addr_idx (gpr) accordingly, clobbers mask (gpr), rcx
-# (works for multiple C strings in str, but not used this way)
 .macro Write_xmm_args str, str_idx, addr_idx, mask
-	vmovdqu \str, (\str_idx)
-
 	# put null mask in mask gpr
 	vpcmpeqb simd_zero, \str, %xmm7
 	vpmovmskb %xmm7, \mask
@@ -119,7 +111,7 @@ L0_\@:
 	cmp $0b11, %rcx
 	jz L1_\@
 
-	# find offset of null byte in mask, add to str_idx
+	# find offset of null byte in mask, add to r15
 	bsf \mask, %rcx
 	add %rcx, \str_idx
 
@@ -131,22 +123,11 @@ L0_\@:
 	mov \str_idx, (\addr_idx) # fill argv address
 	add $8, \addr_idx
 
+	# TODO: buffer overflow possible here with too many args
+
 	jmp L0_\@ # see if more mask bits exist
 
 L1_\@:
-.endm
-
-# wrapper for Write_xmm_args, dumps all xmm registers memory in a packed fashion
-.macro Write_all_argv cmd_idx, argv_idx, mask
-	lea Argv(%r9), \cmd_idx # command string index
-	lea (Argv_ptr + 8)(%r9), \argv_idx # *argv index
-
-	# pack args together in red zone and write *argv pointers
-	.irp i, 0, 1, 2, 3
-		Write_xmm_args %xmm\i, \cmd_idx, \argv_idx, \mask
-	.endr
-
-	movq $0, -8(\argv_idx) # overwrite last address with a null pointer
 .endm
 
 .macro Print label, len
@@ -172,23 +153,6 @@ L1_\@:
 	jnb \dst # jmp if CF = 0, CF = 0 if bytes in string differ
 .endm
 
-# prints status of carry flag and exits if flag is clear
-.macro Check_feature_flag fatal
-	jc L1_\@
-L0_\@:
-	Print check_no, $(check_no_end - check_no)
-.if \fatal
-	mov $60, %rax
-	mov $-1, %rdi
-	syscall
-.else
-	jmp L2_\@
-.endif
-L1_\@:
-	Print check_yes, $(check_yes_end - check_yes)
-L2_\@:
-.endm
-
 _start:
 	lea -128(%rsp), %r9 # legal red zone is rsp - 1 to rsp - 128
 
@@ -196,35 +160,6 @@ _start:
 	mov (%rsp), %r8 # get argc
 	lea 16(%rsp, %r8, 8), %r8 # put 16 + (rsp + r8 * 8) (**env) in r8
 	mov (%r8), %r8 # put *env in r8
-
-cpu_check:
-	# check for SSE 4.2
-	Print check_sse, $(check_sse_end - check_sse)
-	mov $1, %rax
-	cpuid
-	bt $20, %rcx
-	Check_feature_flag 1
-
-	# check for AVX
-	Print check_avx, $(check_avx_end - check_avx)
-	mov $1, %rax
-	cpuid
-	bt $28, %rcx
-	Check_feature_flag 1
-
-	# check for AVX2
-	Print check_avx2, $(check_avx2_end - check_avx2)
-	mov $7, %rax
-	mov $0, %rcx
-	cpuid
-	bt $5, %rbx
-	Check_feature_flag 1
-
-	Print check_avx512, $(check_avx512_end - check_avx512)
-	bt $16, %rbx
-	Check_feature_flag 0
-
-	Print newline, $1
 
 reset:
 	.irp i, 0, 1, 2, 3
@@ -240,7 +175,7 @@ rd_cmd:
 
 	vpxor %xmm6, %xmm6, %xmm6
 
-	# read 4 commands
+	# read up to 64 bytes of cmd
 	.irp i, 0, 1, 2, 3
 		Read %xmm\i, %xmm7, %r10
 
@@ -263,9 +198,19 @@ try_builtin:
 	Jmp_str %xmm0, cmd_cd, cd
 
 write_argv:
+	.irp i, 0, 1, 2, 3
+		vmovdqu %xmm\i, Argv_\i(%r9)
+	.endr
+
 	mov %r9, Argv_ptr(%r9) # set argv[0]
 
-	Write_all_argv %r15, %r14, %r13
+	lea Argv_0(%r9), %r15 # r15 = command string index
+	lea (Argv_ptr + 8)(%r9), %r10 # r10 = *argv index
+
+	Write_xmm_args %xmm0, %r15, %r10, %r14
+	Write_xmm_args %xmm1, %r15, %r10, %r14
+
+	movq $0, -8(%r10) # overwrite last address with a null pointer
 
 write_end_argv:
 	movq $0, (Argv_env_end)(%r9)
@@ -274,7 +219,6 @@ is_parent:
 	# fork()
 	mov $57, %rax
 	syscall
-	#mov $0, %rax
 
 	# if child, call exec()
 	cmp $0, %rax
@@ -297,22 +241,22 @@ wait_exec:
 do_exec:
 	# try cmd itself with execve()
 	mov $59, %rax
-	lea Argv(%r9), %rdi # create *filename
+	lea Argv_0(%r9), %rdi # create *filename
 	lea Argv_ptr(%r9), %rsi # create **argv
 	lea Argv_env_0(%r9), %rdx # create **env
 	syscall
 
+	# try /bin/<exec>
+	#mov $59, %rax
+	#mov path_bin, %r15w
+	#syscall
+
 	# try /usr/bin/<exec>
-	mov $59, %rax
-	mov path_usr_bin, %r13
-	vpslldq $(path_usr_bin_end - path_usr_bin), %xmm0, %xmm0
-	pinsrq $0, %r13, %xmm0
-	pinsrb $8, %r13, %xmm0
+	#mov $59, %rax
+	#mov path_usr_bin, %r15w
+	#syscall
 
-	Write_all_argv %r15, %r14, %r13
-	syscall
-
-	# error out if both tries failed
+	# error out if all three tries failed
 	Print err_msg, $(err_msg_end - err_msg)
 
 	# exit()
@@ -336,8 +280,8 @@ exit:
 cd:
 	# chdir()
 	mov $80, %rax
-	movdqu %xmm1, Argv_arg(%r9)
-	lea Argv_arg(%r9), %rdi # new directory
+	movdqu %xmm1, Argv_1(%r9)
+	lea Argv_1(%r9), %rdi # new directory
 	syscall
 
 	jmp reset
@@ -365,7 +309,7 @@ cmd_version:
 	.asciz "version"
 
 ver_msg:
-	.ascii "smdsh v0.3\n"
+	.ascii "smdsh v0.1\n"
 ver_msg_end:
 
 cmd_exit:
@@ -385,36 +329,11 @@ prompt_end:
 space_msg:
 	.asciz " "
 
+path_bin:
+	.asciz "/bin/"
+
 path_usr_bin:
-	.ascii "/usr/bin/"
-path_usr_bin_end:
-
-check_sse:
-	.asciz "sse 4.2\t"
-check_sse_end:
-
-check_avx:
-	.asciz "avx\t"
-check_avx_end:
-
-check_avx2:
-	.asciz "avx2\t"
-check_avx2_end:
-
-check_avx512:
-	.asciz "avx-512\t"
-check_avx512_end:
-
-check_yes:
-	.asciz "[supported]\n"
-check_yes_end:
-
-check_no:
-	.asciz "[unsupported]\n"
-check_no_end:
-
-newline:
-	.byte '\n'
+	.asciz "/usr/bin/"
 
 # 32 bytes of zeros
 simd_zero:
@@ -424,7 +343,7 @@ simd_zero:
 simd_one:
 	.fill 32, 1, 0xFF
 
-# 32 spaces
+# 32 newlines
 simd_space:
 	.fill 32, 1, ' '
 
