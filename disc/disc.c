@@ -16,12 +16,25 @@
 #include "types.h"
 
 #if __STDC_VERSION__ < 201112L
-#error standard revisions before C11 are not supported!
+#error standard revisions before C11 are not supported.
 #endif
 
-#if __STDC_HOSTED__ != 1
-#warning implementation is not hosted - some standard headers may not be available
-#endif
+void c_rev() {
+	char* version;
+	if (__STDC_VERSION__ == 199409L) {
+		version = "C89";
+	} else if (__STDC_VERSION__ == 199901L) {
+		version = "C99";
+	} else if (__STDC_VERSION__ == 201112L) {
+		version = "C11";
+	} else if (__STDC_VERSION__ == 201710L) {
+		version = "C17";
+	} else {
+		version = "C2x or C++xx?";
+	}
+
+	printf("C standard revision: %s (%ld)\n", version, __STDC_VERSION__);
+}
 
 void signal_handler(int signal) {
 	char* sig_str;
@@ -67,6 +80,7 @@ int main(int argc, char **argv) {
 	gcc_compat();
 
 	std_types();
+	floats();
 
 	atomics();
 	threads();

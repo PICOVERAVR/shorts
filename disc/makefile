@@ -1,7 +1,8 @@
 CC := gcc
 SRC := $(wildcard *.c)
-FLAGS := -Wall -Wextra -Og
+CFLAGS := -Wall -Wextra -Og
+LIBS := -lm -lpthread
 
 disc: $(wildcard *.c)
-	$(CC) $(SRC) $(FLAGS) -o disc
+	@$(CC) $(SRC) $(CFLAGS) $(LIBS) -o disc
 
