@@ -22,37 +22,39 @@ void c_types() {
 	printf("\n");
 }
 
+#define PRINT_SZ_ALN(T, name) printf("\t%s: %ld bytes, %ld byte aligned\n", name, sizeof(T), alignof(T))
+
 void std_types() {
 	printf("standard C types:\n");
 
-	printf("\tint_fast8_t: %ld bytes, %ld byte aligned\n", sizeof(int_fast8_t), alignof(int_fast8_t));
-	printf("\tuint_fast8_t: %ld bytes, %ld byte aligned\n", sizeof(uint_fast8_t), alignof(uint_fast8_t));
-	printf("\tint_fast16_t: %ld bytes, %ld byte aligned\n", sizeof(int_fast16_t), alignof(int_fast16_t));
-	printf("\tuint_fast16_t: %ld bytes, %ld byte aligned\n", sizeof(uint_fast16_t), alignof(uint_fast16_t));
-	printf("\tint_fast32_t: %ld bytes, %ld byte aligned\n", sizeof(int_fast32_t), alignof(int_fast32_t));
-	printf("\tuint_fast32_t: %ld bytes, %ld byte aligned\n", sizeof(uint_fast32_t), alignof(uint_fast32_t));
-	printf("\tint_fast64_t: %ld bytes, %ld byte aligned\n", sizeof(int_fast64_t), alignof(int_fast64_t));
-	printf("\tuint_fast64_t: %ld bytes, %ld byte aligned\n\n", sizeof(uint_fast64_t), alignof(uint_fast64_t));
+	PRINT_SZ_ALN(int_fast8_t, "int_fast8_t");
+	PRINT_SZ_ALN(uint_fast8_t, "uint_fast8_t");
+	PRINT_SZ_ALN(int_fast16_t, "int_fast16_t");
+	PRINT_SZ_ALN(uint_fast16_t, "uint_fast16_t");
+	PRINT_SZ_ALN(int_fast32_t, "int_fast32_t");
+	PRINT_SZ_ALN(uint_fast32_t, "uint_fast32_t");
+	PRINT_SZ_ALN(int_fast64_t, "int_fast64_t");
+	PRINT_SZ_ALN(uint_fast64_t, "uint_fast64_t");
+	printf("\n");
 
-	printf("\tint_least8_t: %ld bytes, %ld byte aligned\n", sizeof(int_least8_t), alignof(int_least8_t));
-	printf("\tuint_least8_t: %ld bytes, %ld byte aligned\n", sizeof(uint_least8_t), alignof(uint_least8_t));
-	printf("\tint_least16_t: %ld bytes, %ld byte aligned\n", sizeof(int_least16_t), alignof(int_least16_t));
-	printf("\tuint_least16_t: %ld bytes, %ld byte aligned\n", sizeof(uint_least16_t), alignof(uint_least16_t));
-	printf("\tint_least32_t: %ld bytes, %ld byte aligned\n", sizeof(int_least32_t), alignof(int_least32_t));
-	printf("\tuint_least32_t: %ld bytes, %ld byte aligned\n", sizeof(uint_least32_t), alignof(uint_least32_t));
-	printf("\tint_least64_t: %ld bytes, %ld byte aligned\n", sizeof(int_least64_t), alignof(int_least64_t));
-	printf("\tuint_least64_t: %ld bytes, %ld byte aligned\n\n", sizeof(uint_least64_t), alignof(uint_least64_t));
+	PRINT_SZ_ALN(int_least8_t, "int_least8_t");
+	PRINT_SZ_ALN(uint_least8_t, "uint_least8_t");
+	PRINT_SZ_ALN(int_least16_t, "int_least16_t");
+	PRINT_SZ_ALN(uint_least16_t, "uint_least16_t");
+	PRINT_SZ_ALN(int_least32_t, "int_least32_t");
+	PRINT_SZ_ALN(uint_least32_t, "uint_least32_t");
+	PRINT_SZ_ALN(int_least64_t, "int_least64_t");
+	PRINT_SZ_ALN(uint_least64_t, "uint_least64_t");
+	printf("\n");
 
-	printf("\tintmax_t: %ld bytes\n", sizeof(intmax_t));
-	printf("\tuintmax_t: %ld bytes\n", sizeof(uintmax_t));
-	printf("\tmax_align_t: %ld bytes\n", alignof(max_align_t));
-	printf("\tsize_t: %ld bytes\n", sizeof(size_t));
-	printf("\twchar_t: %ld bytes, %ld byte aligned\n\n", sizeof(wchar_t), alignof(wchar_t));
-
-	printf("\tintptr_t: %ld bytes, %ld byte aligned\n", sizeof(intptr_t), alignof(intptr_t));
-	printf("\tuintptr_t: %ld bytes, %ld byte aligned\n", sizeof(uintptr_t), alignof(uintptr_t));
-
-	printf("\tptrdiff_t: %ld bytes, %ld byte aligned\n", sizeof(ptrdiff_t), alignof(ptrdiff_t));
+	PRINT_SZ_ALN(intmax_t, "intmax_t");
+	PRINT_SZ_ALN(uintmax_t, "uintmax_t");
+	PRINT_SZ_ALN(max_align_t, "max_align_t");
+	PRINT_SZ_ALN(size_t, "size_t");
+	PRINT_SZ_ALN(wchar_t, "wchar_t");
+	PRINT_SZ_ALN(intptr_t, "intptr_t");
+	PRINT_SZ_ALN(uintptr_t, "uintptr_t");
+	PRINT_SZ_ALN(ptrdiff_t, "ptrdiff_t");
 
 	printf("\n");
 }

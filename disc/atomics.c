@@ -28,7 +28,7 @@ void atomics() {
 }
 #else
 void atomics() {
-	printf("atomics are not supported\n\n");
+	printf("C11 atomics are not supported\n\n");
 }
 #endif
 

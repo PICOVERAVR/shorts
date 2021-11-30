@@ -53,7 +53,7 @@ void floats() {
     printf("\tlong double fma(x, y, z) possibly slower than x * y + z\n\n");
 #endif
 
-	printf("\trounding method: ");
+	printf("\tdefault rounding method: ");
     switch (fegetround()) {
         case FE_TONEAREST:
             printf("FE_TONEAREST (rounding towards nearest representable value)\n");
